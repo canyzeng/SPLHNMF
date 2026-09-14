@@ -2,6 +2,7 @@ import pandas as pd
 from method import model
 import numpy as np
 from WKNN import WKNN_method
+from graph import Graph
 
 class Experiments(object):
     def __init__(self,dru_dis,dru_sim,dis_sim,model_name='SPLHNMF', **kwargs):
@@ -13,64 +14,54 @@ class Experiments(object):
         self.model = model.SPLHNMF_Model(model_name)
         self.parameters = kwargs
 
-    # def CV_triplet(self):
-    #     k_folds = 5
-    #     index_matrix = np.array(np.where(self.dru_dis_mat == 1))
-    #     positive_num = index_matrix.shape[1]
-    #     sample_num_per_fold = int(positive_num / k_folds)
-    #
-    #     np.random.seed(0)
-    #     np.random.shuffle(index_matrix.T)
-    #
-    #     metrics_mat = np.zeros((1, 6))
-    #     for k in range(k_folds):
-    #         print('第{}次交叉验证'.format(k+1))
-    #         train_matrix = np.array(self.dru_dis_mat, copy=True)
-    #         if k != k_folds - 1:
-    #             train_index = tuple(index_matrix[:, k * sample_num_per_fold: (k + 1) * sample_num_per_fold])
-    #         else:
-    #             train_index = tuple(index_matrix[:, k * sample_num_per_fold:])
-    #
-    #         train_matrix[train_index] = 0
-    #
-    #         concat_drug = np.mat(np.hstack([train_matrix, self.dru_sim]))
-    #         concat_disease = np.mat(np.hstack([train_matrix.T, self.dis_sim]))
-    #
-    #         new_train_matrix = np.mat(train_matrix)
-    #
-    #         predict_mat = self.model()(new_train_matrix, concat_drug, concat_disease,
-    #                                       r=self.parameters['r'], alpha=self.parameters['alpha'],
-    #                                       beta=self.parameters['beta'],lamda_l=self.parameters['lamda_l'],
-    #                                       tol=1e-4, max_iter=1000)
-    #
-    #         for num in range(5):
-    #             metrics_mat = metrics_mat + self.cv_tensor_model_evaluate(self.dru_dis_mat,
-    #                                                                             predict_mat,
-    #                                                                             train_index, num)
-    #     result = metrics_mat / (k_folds*5)
-    #     return result
     def CV_triplet(self):
-        k_folds = 10
-        index_matrix = np.array(np.where(self.dru_dis_mat == 1))
-        positive_num = index_matrix.shape[1]
-        sample_num_per_fold = int(positive_num / k_folds)
+        drug_num = self.dru_dis_mat.shape[0]
 
-        np.random.seed(0)
-        np.random.shuffle(index_matrix.T)
+        metrics_mat = np.zeros((1, 6))
+        valid_drug_num = 0
+        metrics_list = []
+        for i in range(drug_num):
+            # 当前药物所有已知的药物-疾病关联
+            disease_index = np.flatnonzero(self.dru_dis_mat[i, :] == 1)
 
-        metrics_mat = np.zeros((1, 6))  # 用于累计所有折的所有评估结果
-        for k in range(k_folds):
-            print('第{}次交叉验证'.format(k + 1))
+            print('disease_index:',disease_index)
+            # 跳过没有已知关联的药物
+            if disease_index.size == 0:
+                print(f'第{i + 1}个药物没有正样本，跳过')
+                continue
+
+            print(
+                f'第{i + 1}/{drug_num}次验证，'
+                f'隐藏正样本数：{disease_index.size}'
+            )
+
+            valid_drug_num += 1
+
+            # 当前药物的所有正样本索引
+            test_index = (
+                np.full(
+                    disease_index.size,
+                    i,
+                    dtype=int
+                ),
+                disease_index
+            )
+
+
             train_matrix = np.array(self.dru_dis_mat, copy=True)
-            if k != k_folds - 1:
-                train_index = tuple(index_matrix[:, k * sample_num_per_fold: (k + 1) * sample_num_per_fold])
-            else:
-                train_index = tuple(index_matrix[:, k * sample_num_per_fold:])
 
-            train_matrix[train_index] = 0
+            # 将当前药物的所有已知关联删除
+            train_matrix[test_index] = 0
 
-            concat_drug = np.mat(np.hstack([train_matrix, self.dru_sim]))
-            concat_disease = np.mat(np.hstack([train_matrix.T, self.dis_sim]))
+            graph_SC = np.mat(Graph(np.array(self.dru_sim), 4))
+            spar_SC = np.multiply(self.dru_sim, graph_SC)
+
+            graph_SD = np.mat(Graph(np.array(self.dis_sim), 4))
+            spar_SD = np.multiply(self.dis_sim, graph_SD)
+
+            concat_drug = np.mat(np.hstack([train_matrix, spar_SC]))
+            concat_disease = np.mat(np.hstack([train_matrix.T, spar_SD]))
+
 
             new_train_matrix = np.mat(train_matrix)
 
@@ -79,31 +70,142 @@ class Experiments(object):
                                        beta=self.parameters['beta'], lamda_l=self.parameters['lamda_l'],
                                        tol=1e-4, max_iter=1000)
 
-            fold_sum = np.zeros((1, 6))  # 用于累计当前折的5次评估结果
+            drug_sum = []
             for num in range(10):
-                metrics = self.cv_tensor_model_evaluate(self.dru_dis_mat, predict_mat, train_index, num)
-                fold_sum += metrics
-                metrics_mat += metrics
+                metrics = self.cv_tensor_model_evaluate(self.dru_dis_mat, predict_mat, test_index, num)
+                drug_sum.append(metrics)
 
-            fold_avg = fold_sum / 10
-            print(f'第{k + 1}折平均指标: {fold_avg}')
+            metrics_arr = np.vstack(drug_sum)
+            print(metrics_arr)
 
-        result = metrics_mat / (k_folds * 5)
+            best_idx = np.argmax(metrics_arr[:, 0])
+            best_metrics = metrics_arr[best_idx:best_idx + 1, :]
+
+            print('第{}个药物平均指标: {}'.format(i + 1, best_metrics))
+            metrics_mat += best_metrics
+            metrics_list.append(best_metrics)
+
+        result = metrics_mat / (valid_drug_num)
+
+        metrics_array = np.array(metrics_list)
+
+        std_result = np.std(
+            metrics_array,
+            axis=0,
+            ddof=1
+        )
+
+        print('\n平均指标:')
+        print(result)
+
+        print('\n标准差:')
+        print(std_result)
+
+        print(
+            '\nAUC: {:.4f} ± {:.4f}'.format(
+                result[0, 0], std_result[0]
+            )
+        )
+        print(
+            'AUPR: {:.4f} ± {:.4f}'.format(
+                result[0, 1], std_result[1]
+            )
+        )
+        print(
+            'F1-score: {:.4f} ± {:.4f}'.format(
+                result[0, 2], std_result[2]
+            )
+        )
+        print(
+            'Precision: {:.4f} ± {:.4f}'.format(
+                result[0, 3], std_result[3]
+            )
+        )
+        print(
+            'Recall: {:.4f} ± {:.4f}'.format(
+                result[0, 4], std_result[4]
+            )
+        )
+        print(
+            'Accuracy: {:.4f} ± {:.4f}'.format(
+                result[0, 5], std_result[5]
+            )
+        )
+
         return result
 
-    def cv_tensor_model_evaluate(self, association_mat, predict_mat, train_index, seed):
-        test_po_num = np.array(train_index).shape[1]
-        test_index = np.array(np.where(association_mat == 0))
-        np.random.seed(seed)
-        np.random.shuffle(test_index.T)
-        test_ne_index = tuple(test_index[:, :test_po_num])
-        real_score = np.column_stack(
-            (np.mat(association_mat[test_ne_index].flatten()), np.mat(association_mat[train_index].flatten())))
-        predict_score = np.column_stack(
-            (np.mat(predict_mat[test_ne_index].flatten()), np.mat(predict_mat[train_index].flatten())))
+    def cv_tensor_model_evaluate(self,association_mat,predict_mat,test_positive_index,seed):
+
+        association_mat = np.asarray(association_mat)
+        predict_mat = np.asarray(predict_mat)
+
+        row_indices = np.asarray(
+            test_positive_index[0],
+            dtype=int
+        ).reshape(-1)
+
+        positive_cols = np.asarray(
+            test_positive_index[1],
+            dtype=int
+        ).reshape(-1)
 
 
-        return self.get_metrics(real_score, predict_score)
+        if positive_cols.size == 0:
+            raise ValueError('当前测试药物没有正样本')
+
+            # 当前留出的药物编号
+        drug_index = int(row_indices[0])
+
+        # 防止 test_positive_index 中混入其他药物
+        if not np.all(row_indices == drug_index):
+            raise ValueError('test_positive_index 中包含多个药物的索引')
+
+        positive_real_score = association_mat[
+            test_positive_index
+        ]
+        positive_predict_score = predict_mat[
+            test_positive_index
+        ]
+
+        # 负样本只从当前药物所在行选择
+        negative_cols = np.flatnonzero(
+            association_mat[drug_index, :] == 0
+        )
+
+        rng = np.random.default_rng(seed)
+        selected_negative_cols = rng.choice(
+            negative_cols,
+            size=positive_cols.size,
+            replace=negative_cols.size < positive_cols.size
+        )
+
+        test_negative_index = (
+            np.full(
+                selected_negative_cols.size,
+                drug_index,
+                dtype=int
+            ),
+            selected_negative_cols
+        )
+
+        negative_real_score = association_mat[
+            test_negative_index
+        ]
+        negative_predict_score = predict_mat[
+            test_negative_index
+        ]
+
+        real_score = np.concatenate([
+            negative_real_score,
+            positive_real_score
+        ]).reshape(1, -1)
+
+        predict_score = np.concatenate([
+            negative_predict_score,
+            positive_predict_score
+        ]).reshape(1, -1)
+
+        return self.get_metrics(np.mat(real_score[0]), np.mat(predict_score[0]))
 
     def get_metrics(self, real_score, predict_score):
         sorted_predict_score = np.array(sorted(list(set(np.array(predict_score).flatten()))))
@@ -157,18 +259,19 @@ class Experiments(object):
         print(auc[0, 0], aupr[0, 0], f1_score, precision, recall, accuracy)
         return auc[0, 0], aupr[0, 0], f1_score, precision, recall, accuracy
 
-import csv
+
 
 if __name__ == '__main__':
 
     # Reading data
-    C_sim = pd.read_csv('./Drug_data/Cdataset/drug_sim_snf.csv',index_col=0)
-    D_sim = pd.read_csv('./Drug_data/Cdataset/disease_sim_snf.csv',index_col=0)
-    CD_data = pd.read_csv('./Drug_data/Cdataset/drug_dis_mat.csv',header=None)
+    C_sim = pd.read_csv('./Drug_data/Fdataset/drug_sim_snf1.csv',index_col=0)
+    D_sim = pd.read_csv('./Drug_data/Fdataset/disease_sim_snf1.csv',index_col=0)
+    CD_data = pd.read_csv('./Drug_data/Fdataset/drug_dis_mat.csv',header=None)
 
     C_sim_mat = np.mat(np.array(C_sim))
     D_sim_mat = np.mat(np.array(D_sim))
     CD_data_mat = np.mat(np.array(CD_data))
+
 
     '''improved association'''
     ## 解决假阴性问题
@@ -178,7 +281,7 @@ if __name__ == '__main__':
     '''基于新的X'''
 
     experiment = Experiments(new_train_matrix_data,C_sim_mat,D_sim_mat,model_name='SPLHNMF',
-                             r = 39, alpha = 0.04, beta = 0.04,
+                             r = 43, alpha = 0.04, beta = 0.04,
                              lamda_l = 0.00001, tol = 1e-5, max_iter = 1000)
     print(experiment.CV_triplet())
     # r_list = [5,9,13,17,21,25,29]
